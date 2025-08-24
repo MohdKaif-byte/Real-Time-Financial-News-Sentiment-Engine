@@ -1,0 +1,122 @@
+version: '3.8' # This just tells Docker which “rulebook” version to use. Think of it like choosing the version of a game or recipe — we’re using version 3.8.
+services:
+  zookeeper:
+    image: wurstmeister/zookeeper # source from where the image would be retrieved or #  This pulls a ready-made Zookeeper “box” (called an image) from the internet. Zookeeper is needed for Kafka to keep track of what’s happening — like a manager that keeps things in order.
+    container_name: zookeeper
+    ports:
+      - "2181:2181" # Expose Zookeeper on port 2181 (default port), this is like a window so others can talk to zookeeper
+    environment:
+      ZOO_LOG4J_PROP: "ERROR,CONSOLE" #This controls how much Zookeeper "talks" in the logs (the messages it prints about what it’s doing). This line says: "Only show error messages, and print them on the screen (console)."
+      ZOO_TICK_TIME: 2000 # Zookeeper works with a group of helpers. Every 2 seconds, it checks to make sure they’re still alive and doing okay. If it waited too long, it might not know if someone crashed.
+      ZOO_INIT_LIMIT: 10  # Time allowed to connect followers or Sometimes when new parts are starting up (like Kafka), they take time to connect. This gives them a bit of breathing room before Zookeeper thinks something is wrong.
+      ZOO_SYNC_LIMIT: 5 # Sometimes a helper is slow. Instead of kicking it out right away, we give it some time (5 seconds) to catch up. If it still lags after that, it may be marked as out of sync.
+      ZOO_LISTEN_ALLIPS_ENABLED: "true" #This is important because Zookeeper has to talk to Kafka and other services. We don’t know their exact IP addresses in advance, so this setting says, "Allow everyone in the same group to talk to me."
+    networks:
+      - kafka-net # This connects Zookeeper to a shared “room” (network) called kafka-net so it can talk to other parts like Kafka.
+    healthcheck: # Ensure Zookeeper is running before starting dependent services
+      test: ["CMD", "sh", "-c", "echo ruok | nc localhost 2181 | grep imok"] # cmd means runs this command as a simple shell command "sh - c" and sends r u okay in short usin netcat call on port 2181 and then it replies i am okay 
+      interval: 15s #it does that every 15 sec
+      timeout: 5s #You're asking Zookeeper: “Are you okay?” (echo ruok) You’ll wait up to 5 seconds for the answer (imok
+      retries: 6 # Retry up to 6 times before considering it unhealthy
+
+  kafka: #This brings in Kafka — the “post office” that delivers messages (like news articles) between different parts of your system.
+    image: wurstmeister/kafka # Retrieve kafka image
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092" # Kafka internal communication #  These open windows (ports) so other parts can talk to Kafka. One is for inside the Docker world, one is for your own computer.
+      - "29092:29092"  # Added for host access
+    networks:
+      - kafka-net
+    environment: #These are settings we’re giving to the Kafka box (container) before it starts. They tell Kafka who it is, how to talk to others, and how to behave.
+      KAFKA_BROKER_ID: 1 # Unique ID for this Kafka broker because if there is more than one we need to give names to each one of them
+      KAFKA_ADVERTISED_HOST_NAME: kafka # “This Kafka will tell others: you can find me using the name kafka. So other parts of your project (like the producer or Spark) can talk to Kafka using its name.
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT #PLAINTEXT means messages are sent as they are, like writing a message on a postcard. Anyone in the network can read it if they want to. It’s fast and easy, but not secure.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092 # “Kafka will open two doors (called ports) and listen for messages.” One door inside the Docker world → port 9092 and One door from your own computer → port 29092
+#So both other containers and your laptop can send messages to Kafka.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092 # When Kafka tells others how to find it, it says: Inside Docker → use kafka:9092From outside (your computer) → use localhost:29092” and This helps different parts (inside and outside Docker) know how to reach Kafka depending on where they are.
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181 # telling kafka here’s where you can find your manager (Zookeeper) — at address zookeeper on port 2181.”
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # Only keep 1 copy of each message tracking record.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true" # If a message comes in with a new topic name (like 'financial-news'), and it doesn’t exist, create it automatically.” and Saves time. You don’t have to manually set up topics beforehand — Kafka makes them for you.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"] # Check if Kafka is listening on port 9092 and This line tells Docker how to check if Kafka is working.It uses CMD to say “run this command.” Then it runs nc -z localhost 9092, which means:
+#“Try to connect to Kafka at address localhost and port 9092.” If Kafka is listening at that port, the test passes ✅ If not, the test fails ❌
+      interval: 5s # checks every 5 sec
+      timeout: 2s # wait for 2 seconds for the reply if there is no reply 
+      retries: 20 #Try up to 20 times before giving up and saying Kafka is unhealthy.
+
+  producer:
+    build: ./producer  # Build the producer service from local Dockerfile in ./producer
+    container_name: producer # Name this box producer
+    networks:
+      - kafka-net # let it talk to other boxes or container on this network
+    depends_on:
+      kafka:
+        condition: service_healthy # start this only if kafka is ready or healthy
+    restart: unless-stopped #If the producer crashes, restart it automatically — unless you stop it yourself.
+    environment:
+      - WAIT_FOR_KAFKA=true # wait until kafka is ready 
+      - KAFKA_BROKER=kafka:9092 # this tells where actually kafka lives 
+      - NEWS_API_KEY=8b81ecffcd6241a0b58d1bd92bed7ac2 # NewsAPI key used to fetch headlines
+
+  consumer:
+    build: ./consumer # Build consumer container from local ./consumer folder
+    container_name: consumer # This is the name of the consumer container 
+    networks:
+      - kafka-net # This is the network over which consumer can talk to other services
+    volumes:
+      - ./shared_data:/app/shared_data # folder for processed results or The volume links the container’s folder to my computer so files saved inside the container can be accessed and shared easily on my computer.
+    depends_on:
+      kafka:
+        condition: service_healthy # Check if kafka is healthy and then only start the consumer
+
+  spark:
+    build: ./spark  # Build Spark container from local ./spark folder dockerfile
+    container_name: spark # This is how the spark would be called by a name
+    networks:
+      - kafka-net # talk to others on this network
+    volumes: #These lines create shared folders between your computer and the Spark container.
+      - ./shared_data:/app/shared_data # Share the folder called shared_data (from your computer) with the container.
+      - /tmp:/tmp:rw # Share computer’s temporary folder (/tmp) with Spark, and allow read & write (rw) access. and Spark sometimes needs a place to store temporary working files, and /tmp is used for that.
+    environment:
+      - SPARK_MODE=master #Tells Spark: "You are the main controller (master) in this setup. and Even though i am using only one Spark container, i still have to define its role.
+      - SPARK_LOCAL_IP=spark # this helps other containers (like Kafka or the dashboard) find Spark and talk to it using the name spark.
+    depends_on:
+      kafka:
+        condition: service_healthy # Do not start spark until kafka is ready
+
+
+  dashboard:
+    build: ./dashboard # Build the dashboard using  a dockerfile present in this folder
+    container_name: dashboard # this would be the name of the container
+    networks:
+      - kafka-net # talk to other components on this network
+    ports:
+      - "8501:8501" # open the website on the browser at localhost:8501
+    volumes:
+      - ./shared_data:/app/shared_data # This here actually reads the file saved by consumer for historical analysis 
+    depends_on:
+      - consumer # Only start the dashboard if consumer is ready
+
+  kafka-topic-config:    # <-- Add this new service here which only does one job
+    image: wurstmeister/kafka # it uses the kafka image
+    depends_on:
+      kafka:
+        condition: service_healthy # do not start this service until kafka is healthy
+    entrypoint: > # “Hey Kafka, I want to change the settings for the topic financial-news-sentiment. Set the message retention time to 1800000 milliseconds (which is 30 minutes).”
+      bash -c "
+        echo 'Waiting for Kafka to be ready...';
+        sleep 20;
+        kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name financial-news-sentiment --alter --add-config retention.ms=1800000 || true; 
+        echo 'Retention set to 30 minutes for financial-news-sentiment topic';
+        sleep 3;
+      "
+    networks:
+      - kafka-net # talk to component on this network
+# Define Docker network used by all services to communicate with each other
+networks:
+  kafka-net:
+    name: kafka-net
+    driver: bridge # Use default bridge driver for container communication
