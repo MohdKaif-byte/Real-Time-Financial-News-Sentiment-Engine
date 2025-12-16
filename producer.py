@@ -15,7 +15,7 @@ KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092") # This is the address whe
 
 # ---- CONFIGURATION ------
 
-API_KEY = "8b81ecffcd6241a0b58d1bd92bed7ac2" # This is the api key used to fetch the news
+API_KEY = "................................" # This is the api key used to fetch the news
 COUNTRIES = ['us', 'cn', 'jp', 'kr', 'gb', 'de', 'fr', 'it', 'es', 'nl', 'ch'] # These are the country codes from where the financial news will be fetched
 
 # ---- KAFKA PRODUCER INITIALIZATION ----
@@ -228,4 +228,5 @@ if __name__ == "__main__": # this runs only when the script is started directly
     except KeyboardInterrupt: # Just to forcefully shutdown the producer
         print("\nShutting down producer...")
         producer.close()
+
         sys.exit(0)
